@@ -1,0 +1,744 @@
+---
+title: "Do changes in personality imply changes in behavior? A longitudinal ESM study"
+author: 
+  - "Emorie D Beck"
+date: "`r Sys.setlocale('LC_TIME', 'C'); format(Sys.time(), '%d\\\\. %B %Y')`"
+output:
+  html_document:
+    theme: united
+    highlight: tango
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_depth: 2
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, warning = F, message = F, error = F)
+```
+
+
+# Workspace
+## Packages
+```{r packages}
+library(lavaan)
+library(psych)
+library(knitr)
+library(kableExtra)
+library(stringr)
+library(plyr)
+library(tidyverse)
+```
+
+## Data {.tabset}
+First, we set the path to the data and read in the codebook that indexes old and new names for the ESM items.
+```{r data}
+data_path <- "~/Box Sync/network/other projects/Correlated Change"
+esm_codebook <- sprintf("%s/data/Codebook.csv", data_path) %>%
+  read.csv(., stringsAsFactors = F) %>% 
+  filter(type == "ESM") %>%
+  tbl_df
+
+head(esm_codebook, 6)
+```
+
+### ESM Data
+
+```{r ESM data, results='hide'}
+wave1_all <- sprintf("%s/data/esm_w1_RENAMED.csv",     data_path) %>% read.csv %>% tbl_df
+wave4_all <- sprintf("%s/data/esm_w4_RENAMED_all.csv", data_path) %>% read.csv %>% tbl_df
+wave7_all <- sprintf("%s/data/esm_w7_RENAMED_all.csv", data_path) %>% read.csv %>% tbl_df
+
+old.names <- esm_codebook$old_name
+new.names <- esm_codebook$new_name
+
+#Getting necessary columns
+#Keeping subject ID and all esm.BFI items
+w1 <- wave1_all %>%
+  select(one_of(paste(old.names, "w1", sep = "."))) %>%
+  setNames(new.names) %>% # change column names
+  mutate(Wave = "S1") 
+w4 <- wave4_all %>%
+  select(one_of(paste(old.names, "w4", sep = "."))) %>%
+  setNames(new.names) %>% # change column names
+  mutate(Wave = "S4")
+w7 <- wave7_all %>%
+  select(one_of(paste(old.names, "w7", sep = "."))) %>%
+  setNames(new.names) %>% # change column names
+  mutate(Wave = "S7")
+
+w1 <- w1 %>%
+  group_by(SID) %>%
+  arrange(day, hourBlock) %>%
+  mutate(beep_seq = seq(1, n(), 1))
+
+(esm_data <- w1 %>% 
+  full_join(w4) %>%
+  full_join(w7) %>% ungroup() %>%
+  mutate_at(vars(A_rude:N_relaxed), funs(mapvalues(., from = 1:5, to = seq(5,1,-1)))) %>%
+  gather(key = item, value = value, A_rude:N_worried) %>%
+  separate(item, c("trait", "item")) %>%
+  group_by(SID, Wave, trait) %>%
+  summarize(mean = mean(value, na.rm = T),
+            mean = ifelse(is.nan(mean) == T, NA_real_, mean)) %>%
+  ungroup() %>%
+  mutate(SID = as.character(SID)) %>%
+  #unite(temp, trait, Wave) %>%
+  spread(key = Wave, value = mean))
+
+# Get scale reliabilities
+alpha_fun <- function(df, trait){
+  trait <- sprintf("%s_", trait)
+  items <- colnames(df)[grepl(trait, colnames(df))]
+  df <- df %>% select(one_of(items))
+  psych::alpha(df)$total$raw_alpha
+}
+
+esm_alphas <- w1 %>%
+  full_join(w4) %>%
+  full_join(w7) %>% ungroup() %>%
+  mutate_at(vars(A_rude:N_relaxed), funs(mapvalues(., from = 1:5, to = seq(5,1,-1)))) %>%
+  gather(key = item, value = value, A_rude:N_worried) %>%
+  separate(item, c("trait", "item")) %>%
+  group_by(SID, Wave, trait, item) %>%
+  summarize(mean = mean(value, na.rm = T),
+            mean = ifelse(is.nan(mean) == T, NA_real_, mean)) %>%
+  ungroup() %>% unite(comb, trait, item, remove = F) %>%
+  select(-item) %>%
+  spread(key = comb, value = mean) %>%
+  group_by(Wave, trait) %>%
+  nest() %>%
+  mutate(alpha = map2_dbl(data, trait, alpha_fun)) %>%
+  select(-data) %>%
+  spread(key = trait, value = alpha)
+
+options(knitr.kable.NA = '')
+esm_alphas %>%
+  kable(., "html", booktabs = T, digits = 2,
+        caption = "Cronbach's Alpha for ESM Scales") 
+
+# Get ESM subjects with at least 2 waves
+(esm_subs <- esm_data %>% ungroup() %>%
+  mutate(na = rowSums(is.na(select(., S1, S4, S7)))) %>%#, S7)))) %>%
+  mutate(esm_inc = ifelse(na <= 1, 1, 0)) %>%
+  select(-na))
+```
+
+### Trait Level: Target
+Now we get the 7 waves of trait level data. In the data file, the items were given an adjective descriptor rather than one that matched the trait and item number in the original BFI. So I create a data frame that does that so I can get this information easily.  
+```{r trait data}
+# make vectors of the original names of the data and the new names I'll give them for ease of use
+old_cols <- c("talkative", "findfault", "thorough", "depressed", "original", "reserved", "helpful",
+          "careless", "relaxed", "curious", "energy", "quarrels", "reliable", "tense", "ingenious",
+          "enthusiasm", "forgiving", "disorganized", "worries", "imagination", "quiet", "trusting",
+          "lazy", "emotionallystable", "inventive", "assertive", "cold", "perseveres", "moody", 
+          "artistic", "shy", "considerate", "efficient", "calm", "routine", "outgoing", "rude",
+          "plans", "nervous", "reflect", "unartistic", "cooperate", "distracted", "sophisticated")
+
+new_cols <- c(paste(rep(c("E", "A", "C", "N", "O"), times = 8), 
+              rep(seq(1,8,1), each = 5), sep = "_"), 
+              "O_9", "A_9", "C_9", "O_10")
+
+cols <- tibble(old = old_cols, new = new_cols)
+
+# load data and rename items to match the original BFI
+(trait_data <- sprintf("%s/data/sevenwaves.csv", data_path) %>% read.csv %>% tbl_df %>%
+  gather(key = item, value = value, outgoing1:sophisticated_d) %>%
+  mutate(item = gsub("[_]", "", item)) %>%
+  separate(item, c("item", "wave"), -2) %>%
+  filter(!(item %in% c("connected", "likesothers"))) %>%
+  mutate(item = factor(mapvalues(item, from = old_cols, to = new_cols), levels = new_cols),
+         wave = mapvalues(wave, from = c("1", "a", "b", "2", "c", "d", "3"),
+                          to = paste("T", seq(1,7,1), sep = ""))) %>%
+  rename(SID = id) %>%
+  select(SID, wave, item, value) %>%
+  spread(key = item, value = value))
+
+
+####Clean Data
+# make keys list
+keys <- c(1, -1, 1, 1, 1, -1, 1, -1, -1, 1, 
+          1, -1, 1, 1, 1, 1, 1, -1, 1, 1,
+          -1, 1, -1, -1, 1, 1, -1, 1, 1, 1,
+          -1, 1, 1, -1, -1, 1, -1, 1, 1, 1,
+          -1, 1, -1, 1)
+
+# reverse code responses
+trait_data[,c(3:46)] <- 
+  reverse.code(keys, trait_data[,c(3:46)],  mini = rep(1,44), maxi = rep(15,44))
+
+# create long format data frame
+(trait_data_long <- trait_data %>%
+  gather(key = item, value = value, E_1:O_10) %>%
+  separate(item, c("trait", "item"), sep = "_") %>%
+  filter(trait != "O") )
+
+# keep only the same items in the ESM portion
+# create composites for traits
+(trait_data_esm <- trait_data_long %>%
+  mutate(SID = as.character(SID)) %>%
+  unite(new, trait, item, remove = F) %>%
+  full_join(cols) %>%
+  filter(old %in% c("depressed", "relaxed", "reliable", 
+                    "worries", "quiet", "lazy", "considerate", 
+                    "outgoing", "rude")) %>%
+  group_by(SID, wave, trait) %>%
+  summarize(value = mean(value, na.rm = T),
+            value = ifelse(is.nan(value) == T, NA, value)) %>%
+  spread(key = wave, value = value) )
+
+# Make data wide for lavaan
+(trait_data_wide <- trait_data_long %>%
+  mutate(SID = as.character(SID)) %>%
+  unite(temp, wave, item) %>%
+  spread(key = temp, value = value) %>%
+  full_join(esm_data))
+
+# calculate scale reliabilities for trait data
+trait_alphas <- trait_data_long %>%
+  mutate(SID = as.character(SID)) %>%
+  unite(new, trait, item, remove = F) %>%
+  full_join(cols) %>%
+  filter(old %in% c("depressed", "relaxed", "reliable", 
+                    "worries", "quiet", "lazy", "considerate", 
+                    "outgoing", "rude") & is.na(value) == F) %>%
+  unite(comb, trait, old, remove = F) %>%
+  select(SID, wave, comb, value, trait) %>%
+  spread(comb, value) %>%
+  group_by(wave, trait) %>%
+  nest() %>%
+  mutate(alpha = map2_dbl(data, trait, alpha_fun)) %>%
+  select(-data) %>%
+  spread(key = trait, value = alpha) 
+
+trait_alphas %>%
+  kable(., "html", booktabs = T, digits = 2,
+        caption = "Cronbach's Alpha for Trait-Level Scales") 
+
+# find subjects who have at least 2 waves of trait data
+(target_subs <- trait_data_wide %>%
+  group_by(SID, trait) %>%
+  summarize(na = rowSums(is.na(cbind(T1_1, T2_1, T3_1, T4_1, T5_1, T6_1, T7_1)))) %>%
+  mutate(trait_inc = ifelse(na < 6, 1, 0)) %>%
+  select(-na))
+
+target.esm.subs <- esm_subs %>% full_join(target_subs)
+```
+
+# Analytic Strategy
+To investigate mean level change in state personality, we used a series of first order latent growth models (LGM) using the `lavaan` package in *R*. We estimated a separate model for each domain for both trait and state (ESM) measures of personality. Such a model estimates not only a latent slope and intercept for each trait, but also a unqiue slope and intercept for each subject, allowing us examine interindividual differences in intraindividual state and trait personality. We created composites of average state levels for each domain before entering them into the model. We similarly created composites of average trait levels for each domain using only the BFI items that were also contained in the state measures. The short BFI model was estimated identically to the state BFI model. Finally, to investigate correlated change, we extracted intraindividual slopes and intecepts from the state and trait models and calculated Pearson correlations between them.   
+
+# Test Retest
+```{r}
+test_retest <- function(Trait, st_tr){
+  if(st_tr == "State"){df <- esm_data}else{df <- trait_data_esm}
+  df <- df %>% ungroup() %>% filter(trait == Trait) %>% select(-SID, -trait)
+  r <- cor(df, use = "pairwise")[-1,1]
+  names(r) <- sprintf("W1-%s", gsub("[TS]", "W", names(r)))
+  tibble(time = names(r), r = r)
+}
+
+crossing(
+  trait = c("E", "A", "C", "N"),
+  st_tr = c("State", "Trait")
+) %>%
+  mutate(tr = map2(trait, st_tr, test_retest)) %>%
+  unnest(tr) %>%
+  mutate(time = factor(time, levels = rev(unique(time[st_tr == "Trait"])))) %>%
+  ggplot(aes(x = st_tr, y = time, fill = r)) +
+  geom_raster() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", limit = c(-1,1)) +
+  geom_text(aes(label = round(r,2)), color = "white") +
+  labs(x = NULL, y = NULL, fill = NULL) +
+  facet_grid(.~trait) +
+  theme_classic() +
+    theme(axis.text = element_text(face = "bold"),
+          axis.title = element_text(face = "bold", size = rel(1.2)),
+          legend.position = "bottom",
+          legend.text = element_text(face = "bold"),
+          legend.title = element_text(face = "bold", size = rel(1.2)),
+          strip.text = element_text(face = "bold", size = rel(1.2)),
+          plot.title = element_text(face = "bold", size = rel(1.2), hjust = .5))
+ggsave(sprintf("%s/plots/test-retest.png", data_path), width = 6, height = 4)
+
+
+# crossing(
+#   trait = c("E", "A", "C", "N"),
+#   st_tr = c("State", "Trait")
+# ) %>%
+#   mutate(tr = map2(trait, st_tr, test_retest)) %>%
+#   unnest(tr) %>%
+#   unite(temp, trait, st_tr, sep = ".") %>%
+#   mutate(temp = factor(temp, levels = paste(rep(c("E", "A", "C", "N"),each = 2), rep(c("State", "Trait"), times = 4), sep = "."))) %>%
+#   spread(key = temp, value = r) %>%
+#   kable(., "html", booktabs = T, digits = 2,
+#         caption = "Test-Retest Consistency",
+#         col.names = c("Time", rep(c("State", "Trait"), times = 4))) %>%
+#   kable_styling(full_width = T) %>%
+#   add_header_above(c(" " = 1, "Extraversion" = 2, "Agreeableness" = 2, 
+#                      "Conscientiousness" = 2, "Neuroticism" = 2))
+```
+
+
+# State (ESM) Models
+```{r stat model}
+model <- '
+  I_S =~ 1*S1 + 1*S4 + 1*S7
+  S_S =~ 0*S1 + 3*S4 + 6*S7
+'
+```
+
+## Define Functions {.tabset}
+I run all the models and store the results in nested data frames using the `purrr` and `tidyr` packages in R, so we'll need some simple functions to perform critical aspects iteratively.  
+
+### Fit Measures
+First, let's make a simple function to the get the fit measures of the SEM models using the `fitmeasures()` function in the `lavaan` package. Then I do some simple transformations to put them into a data frame.  
+```{r fit meas}
+fit_fun <- function(x){
+ fit_m <- t(as.matrix(unclass(fitmeasures(x))))
+ cols <- colnames(fit_m)
+ tbl_df(fit_m) %>% setNames(cols) %>% select(chisq:pvalue, cfi, rmsea)
+}
+```
+
+### Results Tables
+Parameter tables in `lavaan` are not fun to work with. Moreover, I'm focused on a subset of the results, so I write a simple function to extract the slope and intercept terms I am interested in.  
+```{r esm results}
+results_fun <- function(model){
+  out <- tbl_df(parameterestimates(model)) %>%
+    filter((op == "~~" & 
+          (lhs == "S_S" | rhs == "S_S" |
+           lhs == "I_S" | rhs == "I_S")) |
+            (op == "~1" & rhs == "" &
+            (lhs == "S_S" | lhs == "I_S" ))) %>%
+    left_join(tbl_df(suppressWarnings(standardizedsolution(model))) %>%
+      filter((op == "~~" & 
+          (lhs == "S_S" | rhs == "S_S" |
+           lhs == "I_S" | rhs == "I_S")) |
+            (op == "~1" & rhs == "" &
+            (lhs == "S_S" | lhs == "I_S" ))) %>%
+        select(lhs, op, rhs, est.std))
+}
+```
+
+### Predicted Values (Fixed Effects)
+These are growth models, so I'll want to plot the trajectories for each trait across the study period. `lavpredict()` will only provide estimated values for the latent slopes and intercepts, so I'm going to use simple matrix algebra ($\hat{Y} = \mathbf{w^T}\mathbf{X}$) to get the estimates instead.   
+```{r fixed pred fun}
+pred_fun <- function(mod){
+  frame <- tibble(
+    Intercept = 1,
+    Slope = seq(0,6,.01)
+  ) 
+  coefs <- coef(mod)[grepl("~1", names(coef(mod)))]
+  frame$pred <- (frame %>% data.frame() %>% as.matrix()) %*% coefs
+  return(frame)
+}
+```
+
+### Predicted Values (Random Effects)
+For the predicted individual level values, I will use the `lavpredict()` function, which gives me a predicted slope and intercept for each person. Then I'll use simple algebra to get the predicted values.  
+```{r ranef pred fun}
+ranef_pred_fun <- function(fit, subs){
+  pred <- predict(fit) %>% data.frame %>% tbl_df %>%
+    setNames(c("Intercept", "Slope")) %>%
+    bind_cols(subs %>% select(SID, esm_inc, trait_inc)) %>%
+    filter(esm_inc == 1 & trait_inc == 1) %>%
+    select(Intercept:SID)
+  frame <- crossing(
+    SID = unique(pred$SID),
+    Wave = seq(0,6,.01)
+  ) %>%
+    full_join(pred) %>%
+    mutate(pred = Intercept + Slope * Wave) %>%
+    select(SID, Wave, pred) 
+}
+```
+
+
+### Standard Errors  
+I want to estimate confidence intervals around my prediction lines, so I need to get the standard errors of the coefficients. To do so, I'll again use some simple matrix algebra to multiply the model frame of the predictions by the variance-covariance matrix of the fixed effects and extracting the diagonal.  
+```{r SE fun}
+pv_fun <- function(mod){
+  vc <- vcov(mod)
+  vc <- vc[grepl("~1", rownames(vc)), grepl("~1", colnames(vc))]
+  cols <- colnames(vc)
+  df <- expand.grid(
+    Intercept = 1,
+    Slope = seq(0,6,.01),
+    stringsAsFactors = F
+  ) 
+  df$se <- sqrt(diag(as.matrix(df) %*% vc %*% t(as.matrix(df))))
+  return(df)
+}
+```
+
+### Subject Tracking
+I want to make sure I have access to which subjects we can reliably estimate *change* for. We used everyone in the model, but we can only use people who had both state and trait measures to look at correlated change.  
+```{r sub fun}
+sub_fun <- function(df, subs){
+  subs <- unique(subs$SID)
+  df <- df %>% filter(SID %in% subs)
+}
+```
+
+## Run Models
+Finally, let's run the models using the `growth()` function in the `lavaan` package. Then, we'll run all the functions I just defined on the model to get the results we want in a nice format.  
+```{r run esm models}
+target_nested <- esm_data %>%
+  full_join(trait_data_esm) %>%
+  group_by(trait) %>%
+  nest() %>%
+  full_join(target.esm.subs %>% group_by(trait) %>% nest(.key = subs)) %>%
+  mutate(esm.model = map(data, possibly(~growth(model, data = ., missing = "ML"), NA_real_)),
+         esm.results = map(esm.model, possibly(results_fun, NA_real_)),
+         esm.fitmeasures = map(esm.model, fit_fun),
+         esm.pred = map(esm.model, pred_fun),
+         esm.se = map(esm.model, pv_fun),
+         esm.ranef_pred = map2(esm.model, subs, ranef_pred_fun))
+
+target.esm.results <- target_nested %>% unnest(esm.results, .drop = T) %>% mutate(st_tr = "State")
+target.esm.fitmeasures <- target_nested %>% unnest(esm.fitmeasures, .drop = T) %>% mutate(st_tr = "State")
+```
+
+# Trait Level Models
+Now, on to the trait level models. This model is almost identical to the state-level model, except that we had more waves (over the same 2 year period).  
+```{r trait model}
+modelT <- '
+I_T =~ 1*T1 + 1*T2 + 1*T3 + 1*T4 + 1*T5 + 1*T6 + 1*T7 
+S_T =~ 0*T1 + 1*T2 + 2*T3 + 3*T4 + 4*T5 + 5*T6 + 6*T7 '
+```
+
+## Define Functions {.tabset}
+### Results Tables
+Our terms are named differently in the trait model, so we need to define a new function to extract the table results. The rest of the other functions I defined previously will work just fine for these.  
+```{r trait results fun}
+results_fun <- function(model){
+  out <- tbl_df(parameterestimates(model)) %>%
+    filter((op == "~~" & 
+          (lhs == "S_T" | rhs == "S_T" |
+           lhs == "I_T" | rhs == "I_T")) |
+            (op == "~1" & rhs == "" &
+            (lhs == "S_T" | lhs == "I_T" ))) %>%
+    left_join(tbl_df(suppressWarnings(standardizedsolution(model))) %>%
+      filter((op == "~~" & 
+          (lhs == "S_T" | rhs == "S_T" |
+           lhs == "I_T" | rhs == "I_T")) |
+            (op == "~1" & rhs == "" &
+            (lhs == "S_T" | lhs == "I_T")))%>%
+        select(lhs, op, rhs, est.std))
+}
+```
+
+## Run Models
+Let's run the models using the `growth()` function in `lavaan` again, but this time for the trait models.  
+```{r Run trait mods}
+target_nested <- target_nested %>%
+  mutate(target.model = map(data, possibly(~growth(modelT, data = ., missing = "ML"), NA_real_)),
+         target.results = map(target.model, possibly(results_fun, NA_real_)), 
+         target.fitmeasures = map(target.model, fit_fun),
+         target.pred = map(target.model, pred_fun),
+         target.se = map(target.model, pv_fun),
+         target.ranef_pred = map2(target.model, subs, ranef_pred_fun))
+
+target.trait.fitmeasures <- target_nested %>% unnest(target.fitmeasures, .drop = T) %>% mutate(st_tr = "Trait")
+target.trait.results <- target_nested %>% unnest(target.results, .drop = T) %>% mutate(st_tr = "Trait")
+```
+
+# Correlated Change
+Now that we've run our models, we want to see how well their predictions of change within people map on to one another (correlated change). 
+## Define Functions
+We to define a function that will take both the state and trait level models of personality, find matching subjects and calculate the correlation matrix of random slopes and intercepts.  
+```{r CC fun}
+cor_fun <- function(mod1, mod2, subs){
+  x <- tbl_df(unclass(lavPredict(mod1))) %>% select(I_S, S_S) %>%
+    bind_cols((tbl_df(unclass(lavPredict(mod2))) %>% select(I_T, S_T))) %>%
+    bind_cols(subs) %>%
+    filter(esm_inc == 1 & trait_inc == 1) %>%
+    select(I_S:S_T)
+  r <- (x %>% corr.test)$ci %>% data.frame %>% mutate(param = rownames(.)) %>%
+    rename(ci.lower = lower, ci.upper = upper)
+  results <- list(r = r, coef = x)
+  return(results)
+}
+```
+
+## Run Correlations
+Let's run and extract the correlations.  
+```{r}
+target_nested <- target_nested %>%
+  mutate(target.r = pmap(list(esm.model, target.model, subs), cor_fun),
+         target.coef = map(target.r, ~.$coef),
+         target.r = map(target.r, ~.$r))
+
+target.cc.cors <- target_nested %>% unnest(target.r, .drop = T)
+target.fitmeasures <- target.esm.fitmeasures %>% full_join(target.trait.fitmeasures)
+```
+
+# Plots
+## Mean Level Change
+First, let's plot the mean-level trajectories of change, as well as the confidence bands around them. I'll plot state and trait estimates together but use 2 y-axes because they answered on different scales (15 point for trait, and 5 point for state).  
+```{r ML Traj}
+pred_frame <- target_nested %>% unnest(target.pred) %>% mutate(st_tr = "Trait") %>%
+  full_join(target_nested %>% unnest(target.se) %>% mutate(st_tr = "Trait")) %>% 
+    mutate(st_tr = "Trait", lower = pred-2*se, upper = pred+2*se) %>%
+  full_join(target_nested %>% unnest(esm.pred) %>%
+  full_join(target_nested %>% unnest(esm.se)) %>% 
+    mutate(st_tr = "State", lower = pred-2*se, upper = pred+2*se)) %>%
+  mutate(trait = factor(trait, levels = c("E", "A", "C", "N"))) %>%
+  rename(Wave = Slope)
+
+(p1 <- pred_frame   %>%
+  ggplot(aes(x = Wave, y = pred)) +
+  scale_color_manual(values = c("blue", "red")) +
+  geom_ribbon(data = pred_frame %>% filter(st_tr == "Trait"), 
+        aes(ymin = lower, ymax = upper), alpha = .25, fill = "blue") +
+  geom_ribbon(data = pred_frame %>% filter(st_tr == "State"), 
+              aes(ymin = lower*3, ymax = upper*3), alpha = .25, fill = "blue") +
+  geom_line(data = pred_frame %>% filter(st_tr == "Trait"), aes(color = st_tr), size = .75) +
+  geom_line(data = pred_frame %>% filter(st_tr == "State"), aes(y = pred *3, color = st_tr), size = .75) +
+  scale_y_continuous(limits = c(1,15), breaks = c(1,5,10, 15),
+                       sec.axis = sec_axis(~./3, name = "State Estimate",
+                                           breaks = seq(1,5, length.out = 5))) +
+  labs(x = "Wave", y = "Trait Estimate", color = "Perspective") +
+  facet_grid(~trait) +
+  theme_classic() +
+  theme(legend.position = "bottom",
+        axis.text = element_text(face = "bold", size = rel(1.2)),
+        axis.title = element_text(face = "bold", size = rel(1.2)),
+        strip.text = element_text(face = "bold", size = rel(1.2)),
+        legend.text = element_text(face = "bold", size = rel(1.2)),
+        legend.title = element_text(face = "bold", size = rel(1.2))))
+ggsave(sprintf("%s/plots/mean_lev_change.png", data_path), width = 5, height = 3)
+```
+
+## Individual-Level Trajectories
+Now we'll plot the trajectories of predicted values of the individual level effects. 
+```{r Ind Traj}
+ranef_pred <- target_nested %>% unnest(esm.ranef_pred) %>% mutate(st_tr = "State") %>%
+  full_join(target_nested %>% unnest(target.ranef_pred) %>% mutate(st_tr = "Trait")) %>%
+  mutate(trait = factor(trait, levels = c("E", "A", "C", "N")))
+
+p2 <- ranef_pred %>% mutate(type = "Individual Trajectories") %>%
+  ggplot(aes(x = Wave + 1, y = pred, color = st_tr)) +
+    scale_color_manual(values = c("blue", "red")) +
+    scale_x_continuous(limits = c(1,7), breaks = seq(1,7,1), position = "top") +
+    geom_line(data = ranef_pred %>% filter(st_tr == "Trait"),
+              aes(group = SID), size = .15, alpha = .2) +
+    geom_line(data = ranef_pred %>% filter(st_tr == "State"),
+              aes(group = SID, y = pred*3), size = .15, alpha = .2) +
+    scale_y_continuous(limits = c(1,15), breaks = c(1,5,10, 15),
+                       sec.axis = sec_axis(~./3, name = "State Estimate",
+                                           breaks = seq(1,5, length.out = 5))) +
+  labs(x = NULL, y = "Trait Estimate\n ", color = "Perspective") +
+  facet_grid(type~trait) +
+  theme_classic()  +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold", size = rel(1.2), color = "white"),
+        axis.text = element_text(face = "bold", size = rel(1.2)),
+        axis.title = element_text(face = "bold", size = rel(1.2)),
+        strip.text.y = element_text(face = "bold", size = rel(2.5), color = "white"),
+        legend.text = element_text(face = "bold", size = rel(1.2)),
+        legend.title = element_text(face = "bold", size = rel(1.2)),
+        strip.background = element_blank(),
+        strip.text.x = element_text(face = "bold", size = rel(3)),
+        strip.placement = "outside")
+ggsave(sprintf("%s/plots/ranef_change.png", data_path), width = 5, height = 3)
+
+(p2 <- p2 + 
+  geom_line(data = pred_frame %>% filter(st_tr == "Trait"), aes(color = st_tr), size = 1.5) +
+  geom_line(data = pred_frame %>% filter(st_tr == "State"), aes(y = pred *3, color = st_tr), size = 1.5))
+ggsave(sprintf("%s/plots/mean_lev_ranef_change.png", data_path), width = 5, height = 3)
+```
+
+## Variances and Covariances
+With `lavaan`, we not only get variance estimates, but measures of their precision. We'll plot the 95\% confidence intervals around the variance estimates for slope and intercept variances as well as their covariance.  
+```{r VarCov res}
+growth.res <- target.esm.results %>%
+  full_join(target.trait.results) %>%
+  mutate(latent1 = mapvalues(lhs, unique(lhs), c( "Intercept", "Slope", "Intercept", "Slope")),
+         latent1 = ifelse(lhs == rhs, "Variance", latent1),
+         latent2 = mapvalues(rhs, unique(rhs), c("Intercept", "Slope", NA, "Intercept", "Slope")))  %>%
+  select(trait, est, ci.lower, ci.upper, st_tr, latent1, latent2) %>%
+  unite(comb, latent1, latent2, sep = "-") %>%
+  mutate(comb = gsub("-NA", "", comb),
+         st_tr = factor(st_tr, levels = c("State", "Trait", "Corr")),
+         trait = factor(trait, levels = c("E", "A", "C", "N")))
+
+growth.int.var <- growth.res %>% filter(comb == "Variance-Intercept") %>% mutate(comb = factor(comb))
+growth.slp.var <- growth.res %>% filter(comb == "Variance-Slope") %>% mutate(comb = factor(comb), st_tr = factor(st_tr))
+growth.covar   <- growth.res %>% filter(comb == "Intercept-Slope") %>% mutate(comb = factor(comb))
+```
+
+### Intercept Variance
+First, the intercepts. Let's make a forest plot because it's more interesting than a table.  
+```{r Int Var Plot, fig.width=3, fig.height = 4}
+growth.int.var %>%
+  ggplot(aes(x = st_tr, y = est)) +
+  scale_color_manual(values = c("blue", "red")) + 
+  geom_label(aes(y = 1, label = round(est,2), fill = trait), color = "white") +
+  geom_errorbar(data = growth.int.var %>% filter(st_tr == "Trait"), 
+                aes(ymin = ci.lower, ymax = ci.upper), width = .1) +
+  geom_errorbar(data = growth.int.var %>% filter(st_tr == "State"), 
+                aes(ymin = ci.lower * 30, ymax = ci.upper * 30), width = .1) +
+  geom_point(data = growth.int.var %>% filter(st_tr == "Trait"), 
+                aes(y = est, color = st_tr), size = 3) +
+  geom_point(data = growth.int.var %>% filter(st_tr == "State"), 
+                aes(y = est * 30, color = st_tr), size = 3) +
+  geom_hline(aes(yintercept = 0), linetype = "dashed") +
+  scale_y_continuous(limits = c(0,14), breaks = seq(0, 14, 3),
+                       sec.axis = sec_axis(~./30, name = "State Estimate",
+                                           breaks = seq(.0,.5,.1))) +
+  labs(x = NULL, y = "Trait Estimate") +
+  coord_flip() +
+  facet_grid(trait~comb, scales = "free") +
+  theme_classic() +
+  theme(legend.position = "none",
+        axis.text = element_text(face = "bold", size = rel(1.2)),
+        axis.title = element_text(face = "bold", size = rel(1.2)),
+        strip.text = element_text(face = "bold", size = rel(1.2)))
+ggsave(sprintf("%s/plots/var_int.png", data_path), width = 3, height = 4)
+```
+
+### Slope Variances
+Now the slope variances, again with a forest plot.  
+```{r Slope Var Plot, fig.width=6, fig.height = 3}
+p <- growth.slp.var %>%
+  ggplot(aes(x = st_tr, y = est)) +
+  scale_x_discrete(drop = F) +
+  scale_color_manual(values = c("blue", "red"), drop = F) +
+  scale_fill_manual(values = c("blue","red"), drop = F) +
+  geom_hline(aes(yintercept = 0), linetype = "dashed") +
+  geom_label(data = growth.slp.var %>% filter(st_tr == "Trait"), 
+      aes(y = -.13, label = ifelse(est < .001, round(est, 4), ifelse(est < .01, 
+      round(est,3), round(est,2))), fill = st_tr), color = "white") +
+  # geom_errorbar(data = growth.slp.var %>% filter(st_tr == "Trait"), 
+  #               aes(ymin = ci.lower, ymax = ci.upper), width = .1) +
+  geom_point(data = growth.slp.var %>% filter(st_tr == "Trait"), 
+                aes(y = est, color = st_tr), size = 5) +
+  geom_blank(data = growth.slp.var %>% filter(st_tr == "Trait")) +
+  scale_y_continuous(limits = c(-.15,.15), breaks = seq(-.15, .15, length.out = 3),
+                       sec.axis = sec_axis(~./10, name = "State Estimate",
+                                           breaks = seq(-.015,.015, length.out = 3)))+
+  labs(x = NULL, y = "Trait Estimate", color = NULL, fill = NULL) +
+  # coord_flip() +
+  facet_grid(.~trait) +
+  theme_classic() +
+  theme(legend.position = "bottom",
+        legend.text = element_text(face = "bold", size = rel(1.2)),
+        axis.text.x = element_blank(),
+        axis.text = element_text(face = "bold", size = rel(1.2)),
+        axis.title = element_text(face = "bold", size = rel(1.2)),
+        strip.text = element_blank(),# element_text(face = "bold", size = rel(1.2)),
+        strip.background = element_blank())
+
+(p <- p + 
+  geom_label(data = growth.slp.var %>% filter(st_tr == "State"), 
+      aes(y = -.13, label = ifelse(est < .001, round(est, 4), ifelse(est < .01, 
+      round(est,3), round(est,2))), fill = st_tr), color = "white") +
+  # geom_errorbar(data = growth.slp.var %>% filter(st_tr == "State"), 
+  #               aes(ymin = ci.lower * 10, ymax = ci.upper * 10), width = .1) +
+  geom_point(data = growth.slp.var %>% filter(st_tr == "State"), 
+                aes(y = est * 10, color = st_tr), size = 5) )
+ggsave(sprintf("%s/plots/slp_int.png", data_path), width = 3, height = 4)
+```
+
+### Intercept-Trait Covariance  
+Finally, the covariances.  
+```{r Covar Plot, fig.width=3, fig.height = 4}
+growth.covar %>%
+  ggplot(aes(x = st_tr, y = est)) +
+  # scale_color_manual(values = c("blue", "red")) +
+  geom_hline(aes(yintercept = 0), linetype = "dashed") +
+  geom_label(aes(y = .9, label = ifelse(abs(est) < .001, round(est, 4), ifelse(abs(est) < .01, round(est,3), round(est,2))), fill = trait), color = "white") +
+  geom_errorbar(data = growth.covar %>% filter(st_tr == "Trait"), 
+                aes(ymin = ci.lower, ymax = ci.upper), width = .1) +
+  geom_errorbar(data = growth.covar %>% filter(st_tr == "State"), 
+                aes(ymin = ci.lower * 12, ymax = ci.upper * 12), width = .1) +
+  geom_point(data = growth.covar %>% filter(st_tr == "Trait"), 
+                aes(y = est, color = trait, shape = st_tr), size = 4) +
+  geom_point(data = growth.covar %>% filter(st_tr == "State"), 
+                aes(y = est * 12, color = trait, shape = st_tr), size = 4) +
+  scale_y_continuous(limits = c(-1,1), breaks = seq(-1, 1, length.out = 5),
+                       sec.axis = sec_axis(~./12, name = "State Estimate",
+                                           breaks = seq(-.075,.075, length.out = 3))) +
+  labs(x = NULL, y = "Trait Estimate") +
+  coord_flip() +
+  facet_grid(trait~comb, scales = "free") +
+  theme_classic() +
+  theme(legend.position = "none",
+        axis.text = element_text(face = "bold", size = rel(1.2)),
+        axis.title = element_text(face = "bold", size = rel(1.2)),
+        strip.text = element_text(face = "bold", size = rel(1.2)))
+ggsave(sprintf("%s/plots/covar_slp_int.png", data_path), width = 3, height = 4)
+```
+
+## Correlated Change
+Now the exciting part: correlated change. Does your behavior map onto what you say you do? First, we have to extract the results from lavaan and rename some things so we know what they are. Then we'll plot the results in a forest plot. 
+```{r CC plot, fig.width=6, fig.height = 4}
+p1 <- target_nested %>% unnest(target.coef) %>%
+  rename(State = S_S, Trait = S_T) %>%
+   mutate(trait = factor(trait, levels = c("E", "A", "C", "N"))) %>%
+  ggplot(aes(x = State, y = Trait)) +
+    geom_point(aes(color = trait)) +
+    geom_smooth(method = "lm", se = F) +
+    facet_wrap(~trait, switch = "y", scales = "free", nrow = 4) +
+    labs(x = "State Slopes", y = "Trait Slopes") +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(face = "bold", size = rel(1), hjust = .5, color = "white"),
+          axis.text = element_blank(), #element_text(face = "bold", size = rel(1.2)),
+          axis.line.x = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title = element_text(face = "bold", size = rel(1.2)),
+          strip.text = element_text(face = "bold", size = rel(1.2)),
+          strip.background = element_blank(),
+          strip.text.y = element_blank())
+  
+
+cors.res <- target.cc.cors %>%
+    rename(pvalue = p, est = r) %>%
+    separate(param, c("lhs", "rhs"), sep = "-") %>%
+    #filter(!(lhs == "I_S" & rhs == "S_S") & !(lhs == "I_T" & rhs == "S_T")) %>%
+    filter((lhs == "I_S" & rhs == "I_T") | (lhs == "S_S" & rhs == "S_T")) %>%
+    mutate(st_tr = "Corr",
+           latent1 = mapvalues(lhs, unique(lhs), c("Intercept", "Slope")),
+           latent2 = mapvalues(rhs, unique(rhs), c("Intercept", "Slope"))) %>%
+    select(trait, est, ci.lower, ci.upper, st_tr, latent1, latent2)  %>%
+  unite(comb, latent1, latent2, sep = "-") %>%
+  mutate(comb = gsub("-NA", "", comb),
+         st_tr = factor(st_tr, levels = c("State", "Trait", "Corr")),
+         trait = factor(trait, levels = c("E", "A", "C", "N")))
+
+p2 <- cors.res %>% filter(comb == "Slope-Slope") %>%
+  ggplot(aes(x = trait, y = est)) +
+  # scale_color_manual(values = c("blue", "red")) +
+    scale_y_continuous(limits = c(-.7, .7), breaks = seq(-.5, .5, .25)) +
+    geom_hline(aes(yintercept = 0), linetype = "dashed") +
+    geom_errorbar(aes(ymin = ci.lower, ymax = ci.upper), width = .1) +
+    geom_point(aes(color = trait), size = 4) +
+    geom_label(aes(y = -.65, label = round(est,2), fill = trait), color = "white") +
+    labs(y = "Correlation", x = NULL, title = "Slope-Slope Correlations") +
+    coord_flip() +
+    facet_grid(trait~., scales = "free") +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(face = "bold", size = rel(1), hjust = .5),
+          axis.text.y = element_blank(),
+          axis.text.x = element_text(face = "bold", size = rel(1.2)),
+          axis.title = element_text(face = "bold", size = rel(1.2)),
+          strip.text = element_text(face = "bold", size = rel(1.2)))
+
+p <- gridExtra::grid.arrange(p1,p2, nrow = 1)
+ggsave(plot = p, sprintf("%s/plots/CC.png",data_path), width = 6, height = 4)    
+```
+
+
+
+
+
